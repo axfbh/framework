@@ -18,9 +18,9 @@ def setup(args):
 
 
 def train(model, train_loader, val_loader, args):
-    batch_size = args.train.batch_size
+    nb = args.train.batch_size
     nbs = 64  # nominal batch size
-    accumulate = max(round(nbs / batch_size), 1)
+    accumulate = max(round(nbs / nb), 1)
 
     # -------- 梯度优化器 --------
     optimizer = torch.optim.SGD(model.parameters(),
@@ -42,7 +42,7 @@ def train(model, train_loader, val_loader, args):
 
     # -------- 学习率优化器 and 学习率预热器 --------
     scheduler = WarmupMultiStepLR(optimizer,
-                                  milestones=[100, 180],
+                                  milestones=[120, 210],
                                   gamma=0.1,
                                   last_epoch=last_epoch,
                                   warmup_method=args.warmup.warmup_method,
