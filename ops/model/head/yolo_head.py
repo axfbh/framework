@@ -1,40 +1,56 @@
 import torch.nn as nn
 
 from typing import List
+import torch
+import math
+from ops.detection.anchor_utils import make_grid
 
 
-# 定义卷积层：经过这个层仅变换通道数
-class ConvolutionalLayer(nn.Sequential):
-    def __init__(self, out_channels, kernel_size, stride=1, padding=None):
-        padding = (kernel_size - 1) // 2 if padding is None else padding
-        super(ConvolutionalLayer, self).__init__(
-            nn.LazyConv2d(out_channels, kernel_size, stride, padding, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.LeakyReLU()
-        )
+class YoloV7Head(nn.Module):
+    def __init__(self, out_channle_list: List, anchors: List, num_classes: int):
+        super(YoloV7Head, self).__init__()
+        self.nl = len(anchors)
+        self.na = len(anchors[0]) // 2
+        self.num_classes = num_classes
+        self.no = num_classes + 5
+        self.head = nn.ModuleList([nn.Conv2d(out_channle_list[0], self.na * self.no, 1, 1, 0),
+                                   nn.Conv2d(out_channle_list[1], self.na * self.no, 1, 1, 0),
+                                   nn.Conv2d(out_channle_list[2], self.na * self.no, 1, 1, 0)])
 
+        self.register_buffer("anchors", torch.tensor(anchors).float().view(self.nl, -1, 2))  # shape(nl,na,2)
 
-class YoloHead(nn.Module):
-    def __init__(self, out_channle_list: List, num_classes):
-        super(YoloHead, self).__init__()
-        self.head_p5 = nn.Sequential(
-            ConvolutionalLayer(out_channle_list[0], 3),
-            nn.Conv2d(out_channle_list[0], num_classes, 1, 1, 0, bias=False)
-        )
+        # self.reset_parameters()
 
-        self.head_p6 = nn.Sequential(
-            ConvolutionalLayer(out_channle_list[1], 3),
-            nn.Conv2d(out_channle_list[1], num_classes, 1, 1, 0, bias=False)
-        )
+    def reset_parameters(self):
+        stride = [8, 16, 32]
+        for layer, s in zip(self.head, stride):
+            if isinstance(layer, nn.Conv2d):
+                b = layer.bias.view(self.num_anchors, -1)
+                b.data[:, 4] += math.log(8 / (640 / s) ** 2)
+                b.data[:, 5:self.num_classes] += math.log(0.6 / (self.num_classes - 0.99999))
+                layer.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
-        self.head_p7 = nn.Sequential(
-            ConvolutionalLayer(out_channle_list[2], 3),
-            nn.Conv2d(out_channle_list[2], num_classes, 1, 1, 0, bias=False)
-        )
+    def forward(self, x: List, H, W):
+        z = []  # inference output
+        device = self.anchors.device
+        for i in range(self.na):
+            x[i] = self.head[i](x[i])
+            bs, _, ny, nx = x[i].shape  # x(bs,75,20,20) to x(bs,3,20,20,25)
+            x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
+            if not self.training:  # inference
+                anchor = self.anchors[i] / torch.tensor([W, H], device=device) * torch.tensor([nx, ny], device=device)
 
-    def forward(self, x: List):
-        p5 = self.head_p5(x[0])
-        p6 = self.head_p6(x[1])
-        p7 = self.head_p7(x[2])
+                stride = torch.tensor([W, H], device=device) / torch.tensor([nx, ny], device=device)
 
-        return p5, p6, p7
+                shape = 1, self.na, ny, nx, 2  # grid shape
+                grid = make_grid(ny, nx, 1, 1, self.anchors.dtype, device).view((1, 1, ny, nx, 2)).expand(shape)
+                anchor_grid = (anchor * stride).view((1, self.na, 1, 1, 2)).expand(shape)
+
+                xy, wh, conf = x[i].sigmoid().split((2, 2, self.num_classes + 1), -1)
+                xy = (xy * 2 - 0.5 + grid) * stride  # xy
+                wh = (wh * 2) ** 2 * anchor_grid  # wh
+                y = torch.cat((xy, wh, conf), 4)
+
+                z.append(y.view(bs, self.na * nx * ny, self.no))
+
+        return x if self.training else (torch.cat(z, 1), x)
