@@ -27,13 +27,12 @@ class YoloLoss(nn.Module):
         self.cp, self.cn = smooth_BCE(eps=0.0)
         self.num_classes = args.num_classes
         self.device = args.train.device
-        # yolo 大网格：小锚框，小网格：大锚框
 
-        # yolo v3 是小grid先出，大grid后出
-        self.anchors = torch.tensor(args.anchors).view(3, -1, 2).to(self.device)
-
-        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.], device=self.device))
-        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.], device=self.device))
+        # yolo 小grid大anchor，大grid小anchor
+        anchors = args.anchors
+        self.nl = len(anchors)
+        self.na = len(anchors[0]) // 2
+        self.anchors = torch.tensor(anchors).view(self.nl, self.na, 2).to(self.device)
 
     @abstractmethod
     def build_targets(self, targets, grids, image_size):
@@ -96,10 +95,11 @@ class YoloLossV3(YoloLoss):
         return tcls, txy, twh, indices
 
     def forward(self, preds, targets, image_size):
-
         grids = [torch.as_tensor(pi.shape[-2:], device=self.device) for pi in preds]
 
         MSE = nn.MSELoss()
+        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(1, dtype=torch.float32, device=self.device))
+        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(1, dtype=torch.float32, device=self.device))
 
         lcls = torch.zeros(1, dtype=torch.float32, device=self.device)
         lxy = torch.zeros(1, dtype=torch.float32, device=self.device)
@@ -109,7 +109,7 @@ class YoloLossV3(YoloLoss):
         tcls, txy, twh, indices = self.build_targets(targets, grids, image_size)
 
         for i, pi in enumerate(preds):
-            pi = pi.reshape(pi.size(0), len(self.anchors[0]), -1, grids[i][0], grids[i][1])
+            pi = pi.reshape(pi.size(0), self.na, -1, grids[i][0], grids[i][1])
             pi = pi.permute(0, 1, 3, 4, 2).contiguous()
 
             b, a, gj, gi = indices[i]
@@ -136,10 +136,10 @@ class YoloLossV3(YoloLoss):
                 if self.num_classes > 1:
                     t = torch.zeros_like(ps[:, 5:])  # targets
                     t[range(nb), tcls[i] - 1] = 1
-                    lcls += self.BCEcls(ps[:, 5:], t)
+                    lcls += BCEcls(ps[:, 5:], t)
 
             # ------------ 计算 置信度 loss ------------
-            lobj += self.BCEobj(pi[..., 4], tobj)
+            lobj += BCEobj(pi[..., 4], tobj)
 
         lxy *= 11.3
         lwh *= 0.87
@@ -219,9 +219,8 @@ class YoloLossV4(YoloLoss):
     def forward(self, preds, targets, image_size):
         grids = [torch.as_tensor(pi.shape[-2:], device=self.device) for pi in preds]
 
-        bs = preds[0].shape[0]
-
-        cp, cn = smooth_BCE(eps=0.0)
+        BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(1, dtype=torch.float32, device=self.device))
+        BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(1, dtype=torch.float32, device=self.device))
 
         lcls = torch.zeros(1, dtype=torch.float32, device=self.device)
         lbox = torch.zeros(1, dtype=torch.float32, device=self.device)
@@ -230,7 +229,7 @@ class YoloLossV4(YoloLoss):
         tcls, tbox, indices, anchors = self.build_targets(targets, grids, image_size)
 
         for i, pi in enumerate(preds):
-            pi = pi.reshape(pi.size(0), len(self.anchors[0]), -1, grids[i][0], grids[i][1])
+            pi = pi.reshape(pi.size(0), self.na, -1, grids[i][0], grids[i][1])
             pi = pi.permute([0, 1, 3, 4, 2]).contiguous()
 
             b, a, gj, gi = indices[i]
@@ -254,17 +253,17 @@ class YoloLossV4(YoloLoss):
                 lbox += (1.0 - giou).mean()
 
                 if self.num_classes > 1:
-                    t = torch.full_like(ps[:, 5:], cn)  # targets
-                    t[range(nb), tcls[i] - 1] = cp
-                    lcls += self.BCEcls(ps[:, 5:], t)
+                    t = torch.full_like(ps[:, 5:], self.cn)  # targets
+                    t[range(nb), tcls[i] - 1] = self.cp
+                    lcls += BCEcls(ps[:, 5:], t)
 
-            lobj += self.BCEobj(pi[..., 4], tobj)
+            lobj += BCEobj(pi[..., 4], tobj)
 
-        lbox *= 0.05
-        lobj *= 1
-        lcls *= 0.125
+        lbox *= 3.54
+        lobj *= 64.3
+        lcls *= 37.4
 
-        loss = (lbox + lobj + lcls) * bs
+        loss = lbox + lobj + lcls
 
         return loss, lbox.detach(), lobj.detach(), lcls.detach()
 
@@ -275,6 +274,10 @@ class YoloLossV7(YoloLoss):
         super(YoloLossV7, self).__init__(args, thresh)
         self.g = g
         self.balance = [4.0, 1.0, 0.4]
+
+        # Define criteria
+        self.BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.], device=self.device))
+        self.BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([1.], device=self.device))
 
     def build_targets(self, targets, grids, image_size):
         """
@@ -366,7 +369,7 @@ class YoloLossV7(YoloLoss):
         return tcls, tbox, indices, anch
 
     def forward(self, preds, targets, image_size):
-        grids = [torch.as_tensor(pi.shape[-2:], device=self.device) for pi in preds]
+        grids = [torch.as_tensor(pi.shape[-3:-1], device=self.device) for pi in preds]
 
         bs = preds[0].shape[0]
 
@@ -377,8 +380,6 @@ class YoloLossV7(YoloLoss):
         tcls, tbox, indices, anchors = self.build_targets(targets, grids, image_size)
 
         for i, pi in enumerate(preds):
-            pi = pi.reshape(pi.size(0), len(self.anchors[0]), -1, grids[i][0], grids[i][1])
-            pi = pi.permute([0, 1, 3, 4, 2]).contiguous()
 
             b, a, gj, gi = indices[i]
 

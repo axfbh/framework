@@ -6,9 +6,10 @@ from utils.history_collect import save_model, HistoryLoss
 from omegaconf import OmegaConf
 import os
 from utils.model_freeze import FreezeLayer
-from ops.loss.yolo_loss import YoloLossV3
+from ops.loss.yolo_loss import YoloLossV7
 from utils.lr_warmup import WarmupMultiStepLR, WarmupCosineLR
-from utils.weight_inject import WeightInject
+from utils.weight_inject import smart_optimizer, load_model
+from utils.logging import LOGGER, colorstr
 
 
 def setup(args):
@@ -23,26 +24,18 @@ def train(model, train_loader, val_loader, args):
     accumulate = max(round(nbs / nb), 1)
 
     # -------- 梯度优化器 --------
-    optimizer = torch.optim.SGD(model.parameters(),
-                                lr=args.solver.lr,
-                                momentum=args.sgd.momentum,
-                                weight_decay=args.solver.weight_decay)
+    optimizer = smart_optimizer(model, 'SGD', args.solver.lr, args.sgd.momentum, args.solver.weight_decay,
+                                args.model.weights.resume)
 
     # -------- 模型权重加载器 --------
-    injector = WeightInject(model=model,
-                            optimizer=optimizer,
-                            params=args.model.weights,
-                            device=args.weight.device)
+    model, last_epoch = load_model(model, args.model.weights.resume)
 
-    injector.load_state_dict("pretrained", "bkpretrained")
-
-    last_epoch = injector.last_epoch
     start_epoch = last_epoch + 1
     end_epoch = args.iter_max + 1
 
     # -------- 学习率优化器 and 学习率预热器 --------
     scheduler = WarmupMultiStepLR(optimizer,
-                                  milestones=[120, 210],
+                                  milestones=[140, 220],
                                   gamma=0.1,
                                   last_epoch=last_epoch,
                                   warmup_method=args.warmup.warmup_method,
@@ -67,25 +60,26 @@ def train(model, train_loader, val_loader, args):
                                    device=args.train.device,
                                    epoch=epoch,
                                    optimizer=optimizer,
-                                   criterion=YoloLossV3(args, 0.296),
+                                   criterion=YoloLossV7(args, g=0.5, thresh=4),
                                    accumulate=accumulate)
 
         val_metric = val_epoch(model=model,
                                loader=val_loader,
                                device=args.train.device,
                                epoch=epoch,
-                               criterion=YoloLossV3(args, 0.296))
+                               criterion=YoloLossV7(args, g=0.5, thresh=4))
 
         scheduler.step()
 
         save_model(model, optimizer, train_metric)
-        history_loss.append(train_metric['loss'].avg,
-                            val_metric['loss'].avg)
+        history_loss.append(train_metric['lbox'].avg,
+                            0)
         history_loss.loss_plot(start=start_epoch)
 
 
 def main():
     args = OmegaConf.load('./config/config.yaml')
+    LOGGER.info(colorstr("hyperparameters: ") + ", ".join(f"{k}={v}" for k, v in args.items()))
 
     model = setup(args)
 

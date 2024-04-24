@@ -1,144 +1,101 @@
 import os
 
-from torch.utils.data import DataLoader, Dataset
+import torch
+from torch.utils.data import DataLoader
+from ops.dataset.voc_dataset import VOCDetection, CLASSES_NAME
+from ops.dataset.utils import detect_collate_fn
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
 import numpy as np
 import ops.cv.io as io
+from ops.transform.resize_maker import ResizeLongestPaddingShort
+from utils.logging import LOGGER, colorstr
 
 np.random.seed(0)
 
 
-class FileLoader:
-    def __init__(self, path, train_ratio=0.9):
-        self.train_ratio = train_ratio
-        self.image_paths = []
-        self.json_paths = []
+class MyDataSet(VOCDetection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        self.labels = []
-        self.labels2 = []
-        self.labels3 = []
-        self.get_file(path)
-        self.spilt_train_val()
+    def __getitem__(self, item):
+        image, bbox_params, classes = super().__getitem__(item)
 
-    def get_file(self, path):
-        with open(path, 'r') as fp:
-            lines = fp.readlines()
+        # io.visualize(image, bbox_params, classes, CLASSES_NAME)
 
-        for line in lines:
-            path_split = line.split(";")
-            self.image_paths.append(path_split[3].strip())
-            self.json_paths.append(path_split[4].strip())
-            self.labels.append(int(path_split[0]))
-            self.labels2.append(int(path_split[1]))
-            self.labels3.append(int(path_split[2]))
+        resize_sample = ResizeLongestPaddingShort(self.image_size, shuffle=False)(image=image, bbox_params=bbox_params)
 
-        self.image_paths = np.array(self.image_paths)
-        self.json_paths = np.array(self.json_paths)
-        # -------------- 有没有字类别 ----------------
-        self.labels = np.array(self.labels)
-        # -------------- 图片类别 ---------------
-        self.labels2 = np.array(self.labels2)
-        # -------------- json类别 -------------
-        self.labels3 = np.array(self.labels3)
+        sample = self.transform(image=resize_sample['image'], bboxes=resize_sample['bbox_params'], classes=classes)
 
-    def spilt_train_val(self):
-        train_len = len(self.image_paths)
-        all_id = range(train_len)
-        self.train_id = np.random.choice(all_id, int(train_len * self.train_ratio))
-        self.val_id = np.setdiff1d(all_id, self.train_id)
+        image = ToTensorV2()(image=sample['image'])['image']
+        bbox_params = torch.FloatTensor(sample['bboxes'])
+        classes = torch.LongTensor(sample['classes'])[:, None]
 
+        nl = len(bbox_params)
 
-class MyDataSetTrain(Dataset):
-    def __init__(self, file_loader, image_size, transform):
-        super().__init__()
-        self.file_loader = file_loader
-        self.transform = transform
-        self.image_size = image_size
+        if nl:
+            gxy = (bbox_params[:, 2:] + bbox_params[:, :2]) * 0.5
+            gwy = bbox_params[:, 2:] - bbox_params[:, :2]
+        else:
+            gxy = torch.zeros((nl, 2))
+            gwy = torch.zeros((nl, 2))
 
-        self.image_paths = file_loader.image_paths[file_loader.train_id]
-        self.json_paths = file_loader.json_paths[file_loader.train_id]
-        # -------------- 有没有字类别 ----------------
-        self.labels = file_loader.labels[file_loader.train_id]
-        # -------------- 图片类别 ---------------
-        self.labels2 = file_loader.labels2[file_loader.train_id]
-        # -------------- json类别 -------------
-        self.labels3 = file_loader.labels3[file_loader.train_id]
+        indices = torch.zeros_like(classes)
 
-    def __getitem__(self, idx):
-        return 0
+        target = torch.hstack([
+            indices,
+            classes,
+            gxy,
+            gwy
+        ])
 
-    def __len__(self):
-        return len(self.image_paths)
-
-
-class MyDataSetVal(Dataset):
-    def __init__(self, file_loader, image_size):
-        super().__init__()
-        self.file_loader = file_loader
-        self.image_size = image_size
-
-        self.image_paths = file_loader.image_paths[file_loader.val_id]
-        self.json_paths = file_loader.json_paths[file_loader.val_id]
-        # -------------- 有没有字类别 ----------------
-        self.labels = file_loader.labels[file_loader.val_id]
-        # -------------- 图片类别 ---------------
-        self.labels2 = file_loader.labels2[file_loader.val_id]
-        # -------------- json类别 -------------
-        self.labels3 = file_loader.labels3[file_loader.val_id]
-
-    def make_tensor(self, image, image_size):
-        resize_image = cv2.resize(image, (image_size, image_size))
-        tensor_image = A.Normalize()(image=resize_image.copy())['image']
-        tensor_image = ToTensorV2()(image=tensor_image)['image'].unsqueeze(0)
-        return tensor_image, resize_image
-
-    def __getitem__(self, idx):
-        return 0
-
-    def __len__(self):
-        return len(self.image_paths)
+        return image / 255., target
 
 
 def get_loader(args):
-    file_loader = FileLoader(path=args.train_dataset.path)
-
     train_transform = A.Compose([
-        A.Resize(args.image_size, args.image_size),
-        A.HorizontalFlip(p=0.2),
-        A.VerticalFlip(p=0.3),
-        A.GaussNoise(p=0.3),  # 将高斯噪声应用于输入图像。
-        # A.OneOf([
-        #     A.MotionBlur(p=0.2),  # 使用随机大小的内核将运动模糊应用于输入图像。
-        #     A.MedianBlur(blur_limit=3, p=0.1),  # 中值滤波
-        #     A.Blur(blur_limit=3, p=0.1),  # 使用随机大小的内核模糊输入图像。
-        # ], p=0.3),
-        # 随机应用仿射变换：平移，缩放和旋转输入
-        A.ShiftScaleRotate(shift_limit=0.2, scale_limit=0., rotate_limit=90, p=0.4, border_mode=cv2.BORDER_CONSTANT),
-        A.RandomBrightnessContrast(brightness_limit=-0.2, p=0.4),
-        A.Normalize(),
-        ToTensorV2()
-    ])
+        A.Affine(scale={"x": (1 - 0.5, 1 + 0.5), "y": (1 - 0.5, 1 + 0.5)},
+                 translate_percent={"x": (0.5 - 0.1, 0.5 + 0.1), "y": (0.5 - 0.1, 0.5 + 0.1)},
+                 cval=114),
+        A.Blur(p=0.01),
+        A.MedianBlur(p=0.01),
+        A.ToGray(p=0.01),
+        A.CLAHE(p=0.01),
+        A.HueSaturationValue(),
+        A.HorizontalFlip(p=0.5),
+    ], A.BboxParams(format='pascal_voc', label_fields=['classes']))
+    LOGGER.info(f"{colorstr('albumentations: ')}" + ", ".join(
+        f"{x}".replace("always_apply=False, ", "") for x in train_transform if x.p))
 
-    train_dataset = MyDataSetTrain(file_loader,
-                                   image_size=args.image_size,
-                                   transform=train_transform)
+    val_transform = A.Compose([
+    ], A.BboxParams(format='pascal_voc', label_fields=['classes']))
 
-    val_dataset = MyDataSetVal(file_loader,
-                               image_size=args.image_size)
+    train_dataset = MyDataSet(args.train.dataset.path,
+                              'car_train',
+                              args,
+                              train_transform)
 
-    nw = min(3, args.train.batch_size, os.cpu_count())
+    val_dataset = MyDataSet(args.val.dataset.path,
+                            'car_val',
+                            args,
+                            val_transform)
+
+    nw = min(3, args.train.batch_size, 1)
 
     train_loader = DataLoader(dataset=train_dataset,
                               batch_size=args.train.batch_size,
                               shuffle=False,
+                              collate_fn=detect_collate_fn,
+                              persistent_workers=True,
                               num_workers=nw,
                               drop_last=True)
 
     val_loader = DataLoader(dataset=val_dataset,
-                            batch_size=args.val_dataset.batch_size,
+                            batch_size=args.val.batch_size,
                             shuffle=False,
+                            collate_fn=detect_collate_fn,
+                            persistent_workers=True,
                             num_workers=nw,
                             drop_last=True)
 
