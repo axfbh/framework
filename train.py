@@ -1,12 +1,15 @@
+import os
+from pathlib import Path
+from omegaconf import OmegaConf
+
+import torch
+
 from model.modeling import get_model
 from data_loader import get_loader
-import torch
+
+from ops.loss.yolo_loss import YoloLossV7
 from utils.epoch_utils import train_epoch, val_epoch
 from utils.history_collect import save_model, HistoryLoss
-from omegaconf import OmegaConf
-import os
-from utils.model_freeze import FreezeLayer
-from ops.loss.yolo_loss import YoloLossV7
 from utils.lr_warmup import WarmupMultiStepLR, WarmupCosineLR
 from utils.torch_utils import smart_optimizer, smart_resume
 from utils.logging import LOGGER, colorstr
