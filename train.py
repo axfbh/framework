@@ -24,8 +24,15 @@ def train(model, train_loader, val_loader, args):
     accumulate = max(round(nbs / nb), 1)
 
     # -------- 梯度优化器 --------
-    optimizer = smart_optimizer(model, 'SGD', args.solver.lr, args.sgd.momentum, args.solver.weight_decay,
+    optimizer = smart_optimizer(model,
+                                'SGD',
+                                args.solver.lr,
+                                args.sgd.momentum,
+                                args.solver.weight_decay,
                                 args.model.weights.resume)
+
+    # -------- 梯度优化器 --------
+    scaler = torch.cuda.amp.GradScaler(enabled=True)
 
     # -------- 模型权重加载器 --------
     model, last_epoch = load_model(model, args.model.weights.resume)
@@ -34,20 +41,20 @@ def train(model, train_loader, val_loader, args):
     end_epoch = args.iter_max + 1
 
     # -------- 学习率优化器 and 学习率预热器 --------
-    scheduler = WarmupMultiStepLR(optimizer,
-                                  milestones=[140, 220],
-                                  gamma=0.1,
-                                  last_epoch=last_epoch,
-                                  warmup_method=args.warmup.warmup_method,
-                                  warmup_factor=args.warmup.warmup_factor,
-                                  warmup_iters=args.warmup.warmup_iters)
+    # scheduler = WarmupMultiStepLR(optimizer,
+    #                               milestones=[140, 220],
+    #                               gamma=0.1,
+    #                               last_epoch=last_epoch,
+    #                               warmup_method=args.warmup.warmup_method,
+    #                               warmup_factor=args.warmup.warmup_factor,
+    #                               warmup_iters=args.warmup.warmup_iters)
 
-    # scheduler = WarmupCosineLR(optimizer,
-    #                            end_epoch,
-    #                            last_epoch,
-    #                            warmup_method=args.warmup.warmup_method,
-    #                            warmup_factor=args.warmup.warmup_factor,
-    #                            warmup_iters=args.warmup.warmup_iters)
+    scheduler = WarmupCosineLR(optimizer,
+                               end_epoch,
+                               last_epoch,
+                               warmup_method=args.warmup.warmup_method,
+                               warmup_factor=args.warmup.warmup_factor,
+                               warmup_iters=args.warmup.warmup_iters)
 
     # -------- 每个 epoch 的 loss 记录工具 --------
     history_loss = HistoryLoss(args.log_info.path,
@@ -61,6 +68,7 @@ def train(model, train_loader, val_loader, args):
                                    epoch=epoch,
                                    optimizer=optimizer,
                                    criterion=YoloLossV7(args, g=0.5, thresh=4),
+                                   scaler=scaler,
                                    accumulate=accumulate)
 
         val_metric = val_epoch(model=model,
@@ -73,7 +81,7 @@ def train(model, train_loader, val_loader, args):
 
         save_model(model, optimizer, train_metric)
         history_loss.append(train_metric['lbox'].avg,
-                            0)
+                            val_metric['map50'])
         history_loss.loss_plot(start=start_epoch)
 
 

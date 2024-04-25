@@ -4,7 +4,8 @@ import torch.nn.functional as F
 from functools import partial
 from torchvision.ops.misc import Conv2dNormActivation
 
-CBM = partial(Conv2dNormActivation, bias=False, inplace=False, norm_layer=nn.BatchNorm2d, activation_layer=nn.Mish)
+BN = partial(nn.BatchNorm2d, eps=0.001, momentum=0.03)
+CBM = partial(Conv2dNormActivation, bias=False, inplace=True, norm_layer=BN, activation_layer=nn.Mish)
 
 
 class DownSampleLayer(nn.Sequential):
@@ -95,6 +96,7 @@ class CSPDarkNet53(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(1024, num_classes)
 
+    def reset_parameters(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")

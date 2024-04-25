@@ -3,7 +3,7 @@ from tqdm import tqdm
 from utils.history_collect import AverageMeter
 
 
-def train_epoch(model, loader, device, epoch, optimizer, criterion, accumulate=1):
+def train_epoch(model, loader, device, epoch, optimizer, criterion, scaler, accumulate=1):
     model.train()
 
     stream = tqdm(loader)
@@ -21,19 +21,19 @@ def train_epoch(model, loader, device, epoch, optimizer, criterion, accumulate=1
 
         loss = criterion(preds, targets.to(device))
 
-        ori_loss = loss
-
-        loss = loss / accumulate
-
-        loss.backward()
+        scaler.scale(loss).backward()
 
         # ------------- 梯度累积 -------------
         if (i + 1) % accumulate == 0 or (i + 1) == len(loader):
-            optimizer.step()
+            scaler.unscale_(optimizer)  # unscale gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # clip gradients
+            scaler.step(optimizer)  # optimizer.step
+            scaler.update()
             optimizer.zero_grad()
-            metric['loss'].update(ori_loss.detach().item())
-            metric['lr'] = optimizer.param_groups[0]['lr']
-            stream.set_postfix(**metric)
+
+        metric['loss'].update(loss.detach().item())
+        metric['lr'] = optimizer.param_groups[0]['lr']
+        stream.set_postfix(**metric)
 
     return metric
 

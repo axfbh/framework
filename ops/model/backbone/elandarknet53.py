@@ -3,7 +3,8 @@ from torchvision.ops.misc import Conv2dNormActivation
 from functools import partial
 import torch.nn as nn
 
-CBS = partial(Conv2dNormActivation, bias=False, inplace=False, norm_layer=nn.BatchNorm2d, activation_layer=nn.SiLU)
+BN = partial(nn.BatchNorm2d, eps=0.001, momentum=0.03)
+CBS = partial(Conv2dNormActivation, bias=False, inplace=True, norm_layer=BN, activation_layer=nn.SiLU)
 
 
 class Elan(nn.Module):
@@ -84,12 +85,13 @@ class ElanDarkNet53(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(1024, num_classes)
 
-        # for m in self.modules():
-        #     if isinstance(m, nn.Conv2d):
-        #         nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
-        #     elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-        #         nn.init.constant_(m.weight, 1)
-        #         nn.init.constant_(m.bias, 0)
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
     def forward(self, x):
         x = self.stem(x)
